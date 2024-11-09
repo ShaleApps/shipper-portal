@@ -1,0 +1,8 @@
+.vscode
+.DS_Store
+.idea
+.env
+{{SERVICE_NAME}}
+vendor
+**/localfileonly*
+*.icloud

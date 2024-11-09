@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{SERVICE_NAME}}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{SERVICE_NAME}}
+  template:
+    metadata:
+      labels:
+        app: {{SERVICE_NAME}}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+    spec:
+      containers:
+        - name: {{SERVICE_NAME}}
+          image: shaleapps/{{SERVICE_NAME}}:dev_latest
+          ports:
+            - containerPort: 8080
+            - containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          env:
+            - name: LOG_LEVEL
+              value: DEBUG
+            - name: CONSUL_URL
+              value: "consul-server:8500"
+      imagePullSecrets:
+        - name: dockersecret
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: { }
+      terminationGracePeriodSeconds: 30

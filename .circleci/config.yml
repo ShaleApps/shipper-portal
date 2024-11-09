@@ -1,0 +1,168 @@
+version: 2.1
+
+orbs:
+  docker: circleci/docker@2.6.0
+  slack: circleci/slack@4.13.3
+
+executors:
+  slack:
+    docker:
+      - image: circleci/node
+  deploy-executor:
+    parameters:
+      environment:
+        type: string
+    working_directory: ~/project
+    resource_class: "shaleapps/agnus-<< parameters.environment >>"
+    docker:
+      - image: shaleapps/k8s-deployer:9346f7b
+        auth:
+          username: $DOCKER_USER
+          password: $DOCKER_PASSWORD
+
+workflows:
+  version: 2
+  test_publish_deploy:
+    jobs:
+      - test
+      - docker/publish:
+          name: docker_push_dev
+          image: shaleapps/{{SERVICE_NAME}}
+          remote-docker-dlc: true
+          tag: dev_latest,$CIRCLE_SHA1
+          extra_build_args: "--build-arg ACCESS_TOKEN=$ACCESS_TOKEN"
+          requires:
+            - test
+          filters:
+            branches:
+              only: dev
+      - docker/publish:
+          name: docker_push_prod
+          image: shaleapps/{{SERVICE_NAME}}
+          remote-docker-dlc: true
+          tag: prod_latest,$CIRCLE_SHA1
+          extra_build_args: "--build-arg ACCESS_TOKEN=$ACCESS_TOKEN"
+          requires:
+            - test
+          filters:
+            branches:
+              only: master
+      - deploy:
+          name: deploy_dev
+          environment: dev
+          kube_cluster: vrt-agnus-d-gke-k8s-usc1
+          gcp_key_name: $GCLOUD_SERVICE_KEY
+          gcp_project_name: agnus-project-546094
+          k8s_zone_name: us-central1
+          requires:
+            - docker_push_dev
+      - deploy:
+          name: deploy_prod
+          environment: prod
+          kube_cluster: vrt-agnus-p-gke-k8s-usc1
+          gcp_key_name: $GCLOUD_SERVICE_KEY
+          gcp_project_name: agnus-project-546094
+          k8s_zone_name: us-central1
+          requires:
+            - docker_push_prod
+      - notify:
+          name: notify_dev
+          environment: dev
+          app_name: {{SERVICE_NAME}}
+          requires:
+            - deploy_dev
+      - notify:
+          name: notify_prod
+          environment: prod
+          app_name: {{SERVICE_NAME}}
+          requires:
+            - deploy_prod
+
+jobs:
+  test:
+    docker:
+      - image: shaleapps/gcp-go:1.22
+        auth:
+          username: $DOCKER_USER
+          password: $DOCKER_PASSWORD
+    steps:
+      - checkout
+      - run: git config --global url."https://${ACCESS_TOKEN}@github.com/".insteadOf "https://github.com/"
+      - run: make test
+
+  deploy:
+    parameters:
+      environment:
+        type: string
+      kube_cluster:
+        type: string
+      gcp_key_name:
+        type: string
+      gcp_project_name:
+        type: string
+      k8s_zone_name:
+        type: string
+    executor:
+      name: deploy-executor
+      environment: << parameters.environment >>
+    steps:
+      - deploy_k8s:
+          environment: << parameters.environment >>
+          cluster: << parameters.kube_cluster >>
+          deployment_name: {{SERVICE_NAME}}
+          app_name: {{SERVICE_NAME}}
+          gcp_key_name: << parameters.gcp_key_name >>
+          gcp_project_name: << parameters.gcp_project_name >>
+          k8s_zone_name: << parameters.k8s_zone_name >>
+
+  notify:
+    parameters:
+      environment:
+        type: string
+        description: "The environment to deploy to"
+      app_name:
+        type: string
+        description: "The name of the app to deploy"
+    executor: slack
+    steps:
+      - slack/notify:
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "Deployed << parameters.app_name >> to *<< parameters.environment >>* 🚀"
+                  }
+                }
+              ]
+            }
+          event: always
+
+commands:
+  deploy_k8s:
+    description: "Deploys Docker image to the specified Kubernetes cluster"
+    parameters:
+      environment:
+        type: string
+      cluster:
+        type: string
+      deployment_name:
+        type: string
+      app_name:
+        type: string
+      gcp_key_name:
+        type: string
+      gcp_project_name:
+        type: string
+      k8s_zone_name:
+        type: string
+    steps:
+      - checkout
+      - run: gcloud auth activate-service-account --key-file=<(echo "$GCLOUD_SERVICE_KEY")
+      - run: gcloud --quiet config set project << parameters.gcp_project_name >>
+      - run: gcloud --quiet config set compute/zone << parameters.k8s_zone_name >>
+      - run: gcloud --quiet container clusters get-credentials << parameters.cluster >>
+      - run: kubectl apply -n agnus -f k8s/<< parameters.environment >>/deployment.yaml
+      - run: kubectl set image deployment -n agnus << parameters.deployment_name >> << parameters.app_name >>=shaleapps/<< parameters.app_name >>:$CIRCLE_SHA1 --record
